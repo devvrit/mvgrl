@@ -14,6 +14,19 @@ from ogb.nodeproppred import PygNodePropPredDataset
 from torch_geometric.nn import GATConv, GCNConv
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def compute_ppr(graph: nx.Graph, alpha=0.2):
+    D = torch.sparse.mm(graph, torch.ones(graph.size(0),1).to(device)).view(-1)
+    a = [[i for i in range(graph.size(0))],[i for i in range(graph.size(0))]]
+    D = torch.sparse_coo_tensor(torch.tensor(a).to(device), 1/(D**0.5) , graph.size()).to(device) # D^ = Sigma A^_ii
+    I = torch.eye(graph.size(0))
+    # I = torch.sparse_coo_tensor(torch.tensor(a).to(device), torch.ones(graph.size(0)).to(device) , graph.size()).to(device)
+    ADinv = torch.sparse.mm(D, torch.sparse.mm(graph, D)) # A~ = D^(-1/2) x A^ x D^(-1/2)
+    S = alpha*torch.inverse(I - (1-alpha)ADinv.to_dense()) # a(I_n-(1-a)A~)^-1
+    indices = S.nonzero()
+    ind = torch.cat((indices.T[0].view(1,-1), indices.T[1].view(1,-1)), dim=0)
+    vals = S[ind[0],ind[1]]
+    return vals, ind
+
 
 def compute_heat(graph, t=5):
     D = torch.sparse.mm(graph, torch.ones(graph.size(0),1).to(device)).view(-1)
@@ -21,7 +34,7 @@ def compute_heat(graph, t=5):
     D = torch.sparse_coo_tensor(torch.tensor(a).to(device), 1/D , graph.size()).to(device)
     ADinv = torch.sparse.mm(graph, D)
     S_weights = torch.exp(t*ADinv.coalesce().values() - 1)
-    return S_weights
+    return S_weights, None
     #S = torch.exp(t*ADinv - 1)
     #return S.coalesce().values()
     #return np.exp(t * (np.matmul(a, inv(d)) - 1))
@@ -43,7 +56,9 @@ else:
 data = dataset[0].to(device)
 data.edge_index = to_undirected(add_remaining_self_loops(data.edge_index)[0])
 print("Calculating S_weights")
-S_weights = compute_heat(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
+# S_weights = compute_heat(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
+# indices = data.edge_index
+S_weights, indices = compute_ppr(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
 print("S_weights calculated")
 
 
@@ -102,7 +117,7 @@ def train():
     optimizer.zero_grad()
     pos_za, neg_za, summarya = model1(data.x, data.edge_index)
     lossa = model1.loss(pos_za, neg_za, summarya)
-    pos_zs, neg_zs, summarys = model2(data.x, data.edge_index, S_weights)
+    pos_zs, neg_zs, summarys = model2(data.x, indices, S_weights)
     losss = model2.loss(pos_zs, neg_zs, summarys)
     loss = lossa+losss
     loss.backward()
@@ -114,7 +129,7 @@ def test():
     model1.eval()
     model2.eval()
     za, _, _ = model1(data.x, data.edge_index)
-    zs, _, _ = model2(data.x, data.edge_index, S_weights)
+    zs, _, _ = model2(data.x, indices, S_weights)
     z = (za+zs)/2
     torch.save(z, "embedding.pt")
     acc = model1.test(z[train_idx], data.y[train_idx],
