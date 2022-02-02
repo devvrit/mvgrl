@@ -7,36 +7,44 @@ from tqdm import tqdm
 from torch_geometric.datasets import Reddit
 from torch_geometric.loader import NeighborSampler
 from torch_geometric.nn import SAGEConv
+from torch_geometric.datasets import Planetoid
 from torch_geometric.nn import DeepGraphInfomax
 from torch_geometric.utils import to_undirected, add_remaining_self_loops
 from ogb.nodeproppred import PygNodePropPredDataset
+from torch_geometric.nn import GATConv, GCNConv
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def compute_heat(graph, t=5):
-	D = torch.sparse.mm(graph, torch.ones(graph.size(0),1))
-	a = [[i for i in range(graph.size(0))],[i for i in range(graph.size(0))]]
-	D = torch.sparse_coo_tensor(torch.tensor(a), 1/D , graph.size())
-	ADinv = torch.sparse.mm(graph, D)
-    S = torch.exp(t*ADinv - 1)
-    return S.coalesce().values()
-    # return np.exp(t * (np.matmul(a, inv(d)) - 1))
+    D = torch.sparse.mm(graph, torch.ones(graph.size(0),1).to(device)).view(-1)
+    a = [[i for i in range(graph.size(0))],[i for i in range(graph.size(0))]]
+    D = torch.sparse_coo_tensor(torch.tensor(a).to(device), 1/D , graph.size()).to(device)
+    ADinv = torch.sparse.mm(graph, D)
+    S_weights = torch.exp(t*ADinv.coalesce().values() - 1)
+    return S_weights
+    #S = torch.exp(t*ADinv - 1)
+    #return S.coalesce().values()
+    #return np.exp(t * (np.matmul(a, inv(d)) - 1))
 
 
 # path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'Reddit')
 # dataset = Reddit(path)
 # data = dataset[0]
+dataset="cora"
 if dataset[:5]=="ogbn":
-	dataset = PygNodePropPredDataset(name = "ogbn-arxiv")
-	split_idx = dataset.get_idx_split()
-	train_idx, valid_idx, test_idx = split_idx["train"], split_idx["valid"], split_idx["test"]
+    dataset = PygNodePropPredDataset(name = dataset)
+    split_idx = dataset.get_idx_split()
+    train_idx, valid_idx, test_idx = split_idx["train"], split_idx["valid"], split_idx["test"]
 else:
-	dataset = Planetoid(".", dataset)
-	train_idx, valid_idx, test_idx = data['train_mask'].nonzero().view(-1), data['val_mask'].nonzero().view(-1), data['test_mask'].nonzero().view(-1)
+    dataset = Planetoid(".", dataset)
+    data = dataset[0].to(device)
+    train_idx, valid_idx, test_idx = data['train_mask'].nonzero().view(-1), data['val_mask'].nonzero().view(-1), data['test_mask'].nonzero().view(-1)
 
 data = dataset[0].to(device)
 data.edge_index = to_undirected(add_remaining_self_loops(data.edge_index)[0])
-S_weights = compute_heat(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.x.size(0)), (data.x.size(0),data.x.size(0))))
+print("Calculating S_weights")
+S_weights = compute_heat(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
+print("S_weights calculated")
 
 
 class Encoder(nn.Module):
@@ -62,15 +70,18 @@ class Encoder2(nn.Module):
         self.prelu = nn.PReLU(hidden_channels)
         # self.prel = nn.PReLU(hidden_channels)
 
-    def forward(self, x, edge_index):
-        x = self.conv(x, edge_index)
+    def forward(self, x, edge_index, weights):
+        x = self.conv(x, edge_index, weights)
         x = self.prelu(x)
         # x = self.con(x, edge_index)
         # x = self.prel(x)
         return x
 
-def corruption(x, edge_index):
-    return x[torch.randperm(x.size(0))], edge_index
+def corruption(x, edge_index, *args):
+    if len(args)==0:
+        return x[torch.randperm(x.size(0))], edge_index
+    else:
+        return x[torch.randperm(x.size(0))], edge_index, args[0]
 
 
 model1 = DeepGraphInfomax(
@@ -100,15 +111,18 @@ def train():
 
 
 def test():
-    model.eval()
-    z, _, _ = model(data.x, data.edge_index)
+    model1.eval()
+    model2.eval()
+    za, _, _ = model1(data.x, data.edge_index)
+    zs, _, _ = model2(data.x, data.edge_index, S_weights)
+    z = (za+zs)/2
     torch.save(z, "embedding.pt")
-    acc = model.test(z[train_idx], data.y[train_idx],
+    acc = model1.test(z[train_idx], data.y[train_idx],
                      z[test_idx], data.y[test_idx], max_iter=150)
     return acc
 
 
-for epoch in range(1, 101):
+for epoch in range(1, 500):
     loss = train()
     print(f'Epoch: {epoch:03d}, Loss: {loss:.4f}')
 acc = test()
