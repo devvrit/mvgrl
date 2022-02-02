@@ -10,6 +10,7 @@ from torch_geometric.nn import SAGEConv
 from torch_geometric.nn import DeepGraphInfomax
 from torch_geometric.utils import to_undirected, add_remaining_self_loops
 from ogb.nodeproppred import PygNodePropPredDataset
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def compute_heat(graph, t=5):
@@ -25,13 +26,17 @@ def compute_heat(graph, t=5):
 # path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'Reddit')
 # dataset = Reddit(path)
 # data = dataset[0]
+if dataset[:5]=="ogbn":
+	dataset = PygNodePropPredDataset(name = "ogbn-arxiv")
+	split_idx = dataset.get_idx_split()
+	train_idx, valid_idx, test_idx = split_idx["train"], split_idx["valid"], split_idx["test"]
+else:
+	dataset = Planetoid(".", dataset)
+	train_idx, valid_idx, test_idx = data['train_mask'].nonzero().view(-1), data['val_mask'].nonzero().view(-1), data['test_mask'].nonzero().view(-1)
 
-dataset = PygNodePropPredDataset(name = "ogbn-products")
-split_idx = dataset.get_idx_split()
-train_idx, valid_idx, test_idx = split_idx["train"], split_idx["valid"], split_idx["test"]
 data = dataset[0].to(device)
 data.edge_index = to_undirected(add_remaining_self_loops(data.edge_index)[0])
-S_weights = compute_heat(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.x.size(0))), (data.x.size(0),data.x.size(0)))
+S_weights = compute_heat(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.x.size(0)), (data.x.size(0),data.x.size(0))))
 
 
 class Encoder(nn.Module):
