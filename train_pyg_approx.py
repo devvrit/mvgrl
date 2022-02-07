@@ -1,4 +1,5 @@
 import os.path as osp
+import math
 
 import torch
 import torch.nn as nn
@@ -14,6 +15,35 @@ from ogb.nodeproppred import PygNodePropPredDataset
 from torch_geometric.nn import GATConv, GCNConv
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+def ppr(i, alpha=0.2):
+    return alpha*((1-alpha)**i)
+def heat(i, t=5):
+    return (math.e**(-t))*(t**i)/math.factorial(i)
+
+
+def compute_diffusion_matrix(graph, x, niter=5, method="ppr"):
+    D = torch.sparse.mm(graph, torch.ones(graph.size(0),1).to(device)).view(-1)
+    a = [[i for i in range(graph.size(0))],[i for i in range(graph.size(0))]]
+    D = torch.sparse_coo_tensor(torch.tensor(a).to(device), 1/(D**0.5) , graph.size()).to(device) # D^ = Sigma A^_ii
+    ADinv = torch.sparse.mm(graph, D)
+    #ADinv = torch.sparse.mm(D, torch.sparse.mm(graph, D)) # A~ = D^(-1/2) x A^ x D^(-1/2)
+    for i in range(0, niter):
+        print("Iteration: " + str(i))
+        if method=="ppr":
+            theta = ppr(i)
+        elif method=="heat":
+            theta=heat(i)
+        else:
+            raise NotImplementedError
+        if i==0:
+            final = theta*x
+            current = x
+        else:
+            current = torch.sparse.mm(ADinv, current)
+            final+= (theta*current)
+    return final
+
 
 def compute_ppr(graph, alpha=0.2):
     D = torch.sparse.mm(graph, torch.ones(graph.size(0),1).to(device)).view(-1)
@@ -58,12 +88,11 @@ else:
 
 data = dataset[0].to(device)
 data.edge_index = to_undirected(add_remaining_self_loops(data.edge_index)[0])
-print("Calculating S_weights")
-S_weights,_ = compute_heat(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
-indices = data.edge_index
-#S_weights, indices = compute_ppr(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
-print("S_weights calculated")
 #data.x = data.x/torch.norm(data.x, dim=-1).view(-1,1)
+print("Calculating S")
+S = compute_diffusion_matrix(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))), data.x)
+#S_weights, indices = compute_ppr(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
+print("S calculated")
 
 
 class Encoder(nn.Module):
@@ -106,8 +135,7 @@ class Encoder3(nn.Module):
         self.prelu = nn.PReLU(hidden_channels)
         # self.prel = nn.PReLU(hidden_channels)
 
-    def forward(self, x, edge_index, weights):
-        x = torch.sparse.mm(edge_index, x)
+    def forward(self, x, edge_index):
         x = self.w(x)
         x = self.prelu(x)
         # x = self.con(x, edge_index)
@@ -126,7 +154,7 @@ model1 = DeepGraphInfomax(
     summary=lambda z, *args, **kwargs: torch.sigmoid(z.mean(dim=0)),
     corruption=corruption).to(device)
 model2 = DeepGraphInfomax(
-    hidden_channels=512, encoder=Encoder2(dataset.num_features, 512),
+    hidden_channels=512, encoder=Encoder3(dataset.num_features, 512),
     summary=lambda z, *args, **kwargs: torch.sigmoid(z.mean(dim=0)),
     corruption=corruption).to(device)
 optimizer = torch.optim.Adam(list(model1.parameters()) + list(model2.parameters()), lr=0.0001)
@@ -139,7 +167,7 @@ def train():
     optimizer.zero_grad()
     pos_za, neg_za, summarya = model1(data.x, data.edge_index)
     lossa = model1.loss(pos_za, neg_za, summarya)
-    pos_zs, neg_zs, summarys = model2(data.x, indices, S_weights)
+    pos_zs, neg_zs, summarys = model2(data.x, None)
     losss = model2.loss(pos_zs, neg_zs, summarys)
     loss = lossa+losss
     loss.backward()
@@ -151,7 +179,7 @@ def test(epoch):
     model1.eval()
     model2.eval()
     za, _, _ = model1(data.x, data.edge_index)
-    zs, _, _ = model2(data.x, indices, S_weights)
+    zs, _, _ = model2(data.x, None)
     z = (za+zs)/2
     torch.save(z, "embedding.pt_epoch_"+str(epoch))
     #acc = model1.test(z[train_idx], data.y[train_idx],
