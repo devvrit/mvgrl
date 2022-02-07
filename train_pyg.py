@@ -14,18 +14,20 @@ from ogb.nodeproppred import PygNodePropPredDataset
 from torch_geometric.nn import GATConv, GCNConv
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-def compute_ppr(graph: nx.Graph, alpha=0.2):
+def compute_ppr(graph, alpha=0.2):
     D = torch.sparse.mm(graph, torch.ones(graph.size(0),1).to(device)).view(-1)
     a = [[i for i in range(graph.size(0))],[i for i in range(graph.size(0))]]
     D = torch.sparse_coo_tensor(torch.tensor(a).to(device), 1/(D**0.5) , graph.size()).to(device) # D^ = Sigma A^_ii
-    I = torch.eye(graph.size(0))
+    I = torch.eye(graph.size(0)).to(device)
     # I = torch.sparse_coo_tensor(torch.tensor(a).to(device), torch.ones(graph.size(0)).to(device) , graph.size()).to(device)
     ADinv = torch.sparse.mm(D, torch.sparse.mm(graph, D)) # A~ = D^(-1/2) x A^ x D^(-1/2)
-    S = alpha*torch.inverse(I - (1-alpha)ADinv.to_dense()) # a(I_n-(1-a)A~)^-1
+    del D, graph
+    S = alpha*torch.inverse(I - (1-alpha)*ADinv.to_dense()) # a(I_n-(1-a)A~)^-1
     indices = S.nonzero()
     ind = torch.cat((indices.T[0].view(1,-1), indices.T[1].view(1,-1)), dim=0)
     vals = S[ind[0],ind[1]]
-    return vals, ind
+    del ADinv, I
+    return vals, torch.sparse_coo_tensor(ind, vals, S.size())
 
 
 def compute_heat(graph, t=5):
@@ -43,8 +45,8 @@ def compute_heat(graph, t=5):
 # path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'Reddit')
 # dataset = Reddit(path)
 # data = dataset[0]
-dataset="cora"
-if dataset[:5]=="ogbn":
+dataset="ogbn-arxiv"
+if dataset[:4]=="ogbn":
     dataset = PygNodePropPredDataset(name = dataset)
     split_idx = dataset.get_idx_split()
     train_idx, valid_idx, test_idx = split_idx["train"], split_idx["valid"], split_idx["test"]
@@ -56,10 +58,11 @@ else:
 data = dataset[0].to(device)
 data.edge_index = to_undirected(add_remaining_self_loops(data.edge_index)[0])
 print("Calculating S_weights")
-# S_weights = compute_heat(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
-# indices = data.edge_index
-S_weights, indices = compute_ppr(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
+S_weights = compute_heat(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
+indices = data.edge_index
+#S_weights, indices = compute_ppr(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
 print("S_weights calculated")
+data.x = data.x/torch.norm(data.x, dim=-1).view(-1,1)
 
 
 class Encoder(nn.Module):
@@ -80,13 +83,31 @@ class Encoder(nn.Module):
 class Encoder2(nn.Module):
     def __init__(self, in_channels, hidden_channels):
         super().__init__()
-        self.conv = GCNConv(in_channels, hidden_channels, cached=True, normalize=False, add_self_loops=False)
+        self.conv = GCNConv(in_channels, hidden_channels, cached=False, normalize=False, add_self_loops=False)
         # self.con = GCNConv(hidden_channels, hidden_channels, cached=True)
         self.prelu = nn.PReLU(hidden_channels)
         # self.prel = nn.PReLU(hidden_channels)
 
     def forward(self, x, edge_index, weights):
         x = self.conv(x, edge_index, weights)
+        x = self.prelu(x)
+        # x = self.con(x, edge_index)
+        # x = self.prel(x)
+        return x
+
+
+class Encoder3(nn.Module):
+    def __init__(self, in_channels, hidden_channels):
+        super().__init__()
+        #self.con = GCNConv(hidden_channels, hidden_channels, cached=True)
+        self.w = nn.Linear(in_channels, hidden_channels, bias=True)
+        self.w.bias.data.fill_(0.0)
+        self.prelu = nn.PReLU(hidden_channels)
+        # self.prel = nn.PReLU(hidden_channels)
+
+    def forward(self, x, edge_index, weights):
+        x = torch.sparse.mm(edge_index, x)
+        x = self.w(x)
         x = self.prelu(x)
         # x = self.con(x, edge_index)
         # x = self.prel(x)
@@ -125,20 +146,32 @@ def train():
     return loss.item()
 
 
-def test():
+def test(epoch):
     model1.eval()
     model2.eval()
     za, _, _ = model1(data.x, data.edge_index)
     zs, _, _ = model2(data.x, indices, S_weights)
     z = (za+zs)/2
-    torch.save(z, "embedding.pt")
-    acc = model1.test(z[train_idx], data.y[train_idx],
-                     z[test_idx], data.y[test_idx], max_iter=150)
-    return acc
+    torch.save(z, "embedding.pt_epoch_"+str(epoch))
+    #acc = model1.test(z[train_idx], data.y[train_idx],
+    #                 z[test_idx], data.y[test_idx], max_iter=150)
+    #return acc
+    return 0
 
 
-for epoch in range(1, 500):
+loss_min = 999999999.0
+cnt=0
+for epoch in range(1, 20):
     loss = train()
+    if loss<loss_min:
+        loss_min=loss
+        cnt=0
+    else:
+        cnt+=1
+        if cnt>=20:
+            print("Early stopping!")
+            break
     print(f'Epoch: {epoch:03d}, Loss: {loss:.4f}')
+    test(epoch)
 acc = test()
 print(f'Accuracy: {acc:.4f}')
