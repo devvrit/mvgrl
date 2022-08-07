@@ -49,7 +49,7 @@ def compute_heat(graph, t=5):
 # data = dataset[0]
 dataset="ogbn-arxiv"
 if dataset[:4]=="ogbn":
-    dataset = PygNodePropPredDataset(name = dataset, root="/home/devvrit/datasets/")
+    dataset = PygNodePropPredDataset(name = dataset, root="./dataset/")
     split_idx = dataset.get_idx_split()
     train_idx, valid_idx, test_idx = split_idx["train"], split_idx["valid"], split_idx["test"]
 else:
@@ -64,9 +64,10 @@ data_s.edge_index = to_undirected(add_remaining_self_loops(data_s.edge_index)[0]
 print("Calculating S_weights")
 transform = T.GDC(diffusion_kwargs={'alpha': 0.15, 'method': 'ppr', 'eps': 1e-3}, sparsification_kwargs={'eps': 1e-3,'method': 'threshold'}, exact=False)
 data_s = transform(data_s)
+print("orig_data:", data)
 print("data_s:", data_s)
 #S_weights,_ = compute_heat(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
-indices = data.edge_index
+#indices = data.edge_index
 #S_weights, indices = compute_ppr(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
 print("S_weights calculated")
 #data.x = data.x/torch.norm(data.x, dim=-1).view(-1,1)
@@ -146,7 +147,7 @@ def train():
     optimizer.zero_grad()
     pos_za, neg_za, summarya = model1(data.x, data.edge_index)
     lossa = model1.loss(pos_za, neg_za, summarya)
-    pos_zs, neg_zs, summarys = model2(data.x, data.edge_index, data_s.edge_attr)
+    pos_zs, neg_zs, summarys = model2(data.x, data_s.edge_index, data_s.edge_attr)
     losss = model2.loss(pos_zs, neg_zs, summarys)
     loss = lossa+losss
     loss.backward()
