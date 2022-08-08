@@ -45,7 +45,7 @@ def compute_heat(graph, t=5):
 dataset="ogbn-arxiv"
 dataset="Cora"
 if dataset[:4]=="ogbn":
-    dataset = PygNodePropPredDataset(name = dataset, root="/home/devvrit/datasets/")
+    dataset = PygNodePropPredDataset(name = dataset, root="./dataset/")
     split_idx = dataset.get_idx_split()
     train_idx, valid_idx, test_idx = split_idx["train"], split_idx["valid"], split_idx["test"]
 else:
