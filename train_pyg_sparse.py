@@ -1,17 +1,12 @@
-import os.path as osp
-
 import torch
 import torch.nn as nn
 
 from tqdm import tqdm
-from torch_geometric.datasets import Reddit
-from torch_geometric.loader import NeighborSampler
-#from torch_geometric.nn import SAGEConv
-from torch_geometric.datasets import Planetoid
+from ogb.nodeproppred import PygNodePropPredDataset
 import torch_geometric.transforms as T
+from torch_geometric.datasets import Planetoid
 from torch_geometric.nn import DeepGraphInfomax
 from torch_geometric.utils import to_undirected, add_remaining_self_loops
-from ogb.nodeproppred import PygNodePropPredDataset
 from torch_geometric.nn import GATConv, GCNConv
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -48,12 +43,13 @@ def compute_heat(graph, t=5):
 # dataset = Reddit(path)
 # data = dataset[0]
 dataset="ogbn-arxiv"
+dataset="Cora"
 if dataset[:4]=="ogbn":
     dataset = PygNodePropPredDataset(name = dataset, root="/home/devvrit/datasets/")
     split_idx = dataset.get_idx_split()
     train_idx, valid_idx, test_idx = split_idx["train"], split_idx["valid"], split_idx["test"]
 else:
-    dataset = Planetoid(".", dataset)
+    dataset = Planetoid("/home/devvrit/datasets/", dataset)
     data = dataset[0].to(device)
     train_idx, valid_idx, test_idx = data['train_mask'].nonzero().view(-1), data['val_mask'].nonzero().view(-1), data['test_mask'].nonzero().view(-1)
 
@@ -62,14 +58,17 @@ data.edge_index = to_undirected(add_remaining_self_loops(data.edge_index)[0])
 data_s = dataset[0].to(device)
 data_s.edge_index = to_undirected(add_remaining_self_loops(data_s.edge_index)[0])
 print("Calculating S_weights")
-transform = T.GDC(diffusion_kwargs={'alpha': 0.15, 'method': 'ppr', 'eps': 1e-3}, sparsification_kwargs={'eps': 1e-3,'method': 'threshold'}, exact=False)
+#transform = T.GDC(diffusion_kwargs={'alpha': 0.15, 'method': 'ppr', 'eps': 1e-4}, sparsification_kwargs={'avg_degree': 128,'method': 'threshold'}, exact=True)
+transform = T.GDC(diffusion_kwargs={'alpha': 0.05, 'method': 'ppr'}, sparsification_kwargs=dict(method='topk', k=128, dim=0), exact=True)
 data_s = transform(data_s)
+#data_s.edge_index, data_s.edge_attr = to_undirected(data_s.edge_index, data_s.edge_attr)
+print("data_orig:", data)
 print("data_s:", data_s)
 #S_weights,_ = compute_heat(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
-indices = data.edge_index
+#indices = data.edge_index
 #S_weights, indices = compute_ppr(torch.sparse_coo_tensor(data.edge_index, torch.ones(data.edge_index.size(1)).to(device), (data.x.size(0),data.x.size(0))))
 print("S_weights calculated")
-#data.x = data.x/torch.norm(data.x, dim=-1).view(-1,1)
+data.x = data.x/torch.norm(data.x, dim=-1).view(-1,1)
 
 
 class Encoder(nn.Module):
@@ -90,14 +89,15 @@ class Encoder(nn.Module):
 class Encoder2(nn.Module):
     def __init__(self, in_channels, hidden_channels):
         super().__init__()
-        #self.conv = GCNConv(in_channels, hidden_channels, cached=False, normalize=False, add_self_loops=False)
+        #self.conv = GCNConv(in_channels, hidden_channels, cached=True, normalize=False, add_self_loops=False)
         self.conv = GCNConv(in_channels, hidden_channels, cached=True, normalize=False)
-        # self.con = GCNConv(hidden_channels, hidden_channels, cached=True)
+        #self.conv = GCNConv(in_channels, hidden_channels, cached=True)
         self.prelu = nn.PReLU(hidden_channels)
         # self.prel = nn.PReLU(hidden_channels)
 
     def forward(self, x, edge_index, weights):
         x = self.conv(x, edge_index, weights)
+        #x = self.conv(x, edge_index)
         x = self.prelu(x)
         # x = self.con(x, edge_index)
         # x = self.prel(x)
@@ -146,9 +146,10 @@ def train():
     optimizer.zero_grad()
     pos_za, neg_za, summarya = model1(data.x, data.edge_index)
     lossa = model1.loss(pos_za, neg_za, summarya)
-    pos_zs, neg_zs, summarys = model2(data.x, data.edge_index, data_s.edge_attr)
+    pos_zs, neg_zs, summarys = model2(data.x, data_s.edge_index, data_s.edge_attr)
     losss = model2.loss(pos_zs, neg_zs, summarys)
     loss = lossa+losss
+    #loss = lossa
     loss.backward()
     optimizer.step()
     return loss.item()
@@ -160,6 +161,7 @@ def test(epoch):
     za, _, _ = model1(data.x, data.edge_index)
     zs, _, _ = model2(data.x, data_s.edge_index, data_s.edge_attr)
     z = (za+zs)/2
+    #z = za
     torch.save(z, "embedding.pt_epoch_"+str(epoch))
     #acc = model1.test(z[train_idx], data.y[train_idx],
     #                 z[test_idx], data.y[test_idx], max_iter=150)
@@ -169,7 +171,7 @@ def test(epoch):
 
 loss_min = 999999999.0
 cnt=0
-for epoch in range(1, 20):
+for epoch in range(1, 40):
     loss = train()
     if loss<loss_min:
         loss_min=loss
