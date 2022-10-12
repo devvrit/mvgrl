@@ -9,7 +9,9 @@ signal.alarm(10)
 from tqdm import tqdm
 import numpy as np
 import torch_geometric.transforms as T
+from torch_geometric.loader import NeighborSampler
 from ogb.nodeproppred import PygNodePropPredDataset
+from torch_geometric.nn import SAGEConv
 from torch_geometric.nn import DeepGraphInfomax
 from torch_geometric.utils import to_undirected, add_remaining_self_loops
 from torch_geometric.nn import GCNConv
@@ -83,7 +85,7 @@ data_s = transform(data_s)
 print("data_orig:", data)
 print("data_s:", data_s)
 print("------S_weights calculated-------")
-
+x = data.x
 
 train_loader = NeighborSampler(data.edge_index, node_idx=None,
                                sizes=[25, 20, 10], batch_size=2048,
@@ -92,6 +94,9 @@ train_loader = NeighborSampler(data.edge_index, node_idx=None,
 train_s_loader = NeighborSampler(data_s.edge_index, node_idx=None,
                               sizes=[25, 20, 10], batch_size=2048,
                               shuffle=True, num_workers=0)
+test_loader = NeighborSampler(data.edge_index, node_idx=None,
+                              sizes=[25, 20, 10], batch_size=2048,
+                              shuffle=False, num_workers=0)
 
 class Encoder(nn.Module):
     def __init__(self, in_channels, hidden_channels):
@@ -134,39 +139,103 @@ optimizer = torch.optim.Adam(list(model1.parameters()) + list(model2.parameters(
 nmi_arr = []
 
 
-def train():
+
+def train(epoch):
     model1.train()
     model2.train()
-    optimizer.zero_grad()
-    pos_za, neg_za, summarya = model1(data.x, data.edge_index)
-    lossa = model1.loss(pos_za, neg_za, summarya)
-    pos_zs, neg_zs, summarys = model2(data.x, data_s.edge_index)
-    losss = model2.loss(pos_zs, neg_zs, summarys)
-    loss = lossa+losss
-    #loss = lossa
-    loss.backward()
-    optimizer.step()
-    return loss.item()
+
+    total_loss = total_examples = 0
+    it=0
+    for batch_size, n_id, adjs in tqdm(train_loader,
+                                       desc=f'Epoch {epoch:02d}'):
+        # `adjs` holds a list of `(edge_index, e_id, size)` tuples.
+        adjsa = [adj.to(device) for adj in adjs]
+        _,n_ids,adjss = train_s_loader.sample(n_id[:batch_size])
+        adjss = [adj.to(device) for adj in adjss]
+
+        optimizer.zero_grad()
+        pos_za, neg_za, summarya = model1(x[n_id], adjs)
+        lossa = model1.loss(pos_za, neg_za, summarya)
+        pos_zs, neg_zs, summarys = model2(x[n_ids], adjs)
+        losss = model2.loss(pos_zs, neg_zs, summarys)
+        loss = (lossa+losss)/2
+        loss.backward()
+        optimizer.step()
+        total_loss += float(loss) * pos_za.size(0)
+        total_examples += pos_za.size(0)
+        it+=1
+    return total_loss / total_examples
 
 
-def test(epoch):
+def eval(epoch):
     model1.eval()
     model2.eval()
-    za, _, _ = model1(data.x, data.edge_index)
-    zs, _, _ = model2(data.x, data_s.edge_index)
-    z = (za+zs)/2
-    #z = za
-    nmi = calc_nmi(z, int(y.max()+1))
-    nmi_arr.append(nmi)
-    return
+    with torch.no_grad():
+        z = []
+        for batch_size, n_id, adjs in tqdm(test_loader, desc=f'Test Epoch {epoch:02d}'):
+            adjsa = [adj.to(device) for adj in adjs]
+            _, n_ids, adjss = train_s_loader.sample(n_id[:batch_size])
+            adjss = [adj.to(device) for adj in adjss]
+            za = model1(x[n_id], adjsa)[0]
+            zs = model2(x[n_ids], adjss)[0]
+            z.append((za+zs)/2)
+        z = torch.cat(z, dim=0)
+        z = torch.nn.functional.normalize(z)
+        y_pred,_ = Kmeans(z.detach(), y.max()+1)
+        nmi = calc_nmi(z, int(y.max()+1))
+        print("nmi: " + str(nmi))
+        nmi_arr.append(nmi)
 
 
 loss_min = 999999999.0
 cnt=0
-for epoch in range(1, 501):
-    loss = train()
+for epoch in range(1, 3):
+    loss = train(epoch)
     print(f'Epoch: {epoch:03d}, Loss: {loss:.4f}')
-    if epoch%50==0:
-    	test(epoch)
-print("nmi measured every 50th epoch:")
+    eval(epoch)
 print(nmi_arr)
+
+
+
+
+
+
+
+############################
+
+# def train():
+#     model1.train()
+#     model2.train()
+#     optimizer.zero_grad()
+#     pos_za, neg_za, summarya = model1(data.x, data.edge_index)
+#     lossa = model1.loss(pos_za, neg_za, summarya)
+#     pos_zs, neg_zs, summarys = model2(data.x, data_s.edge_index)
+#     losss = model2.loss(pos_zs, neg_zs, summarys)
+#     loss = lossa+losss
+#     #loss = lossa
+#     loss.backward()
+#     optimizer.step()
+#     return loss.item()
+
+
+# def test(epoch):
+#     model1.eval()
+#     model2.eval()
+#     za, _, _ = model1(data.x, data.edge_index)
+#     zs, _, _ = model2(data.x, data_s.edge_index)
+#     z = (za+zs)/2
+#     #z = za
+#     nmi = calc_nmi(z, int(y.max()+1))
+#     nmi_arr.append(nmi)
+#     return
+
+
+# loss_min = 999999999.0
+# cnt=0
+# for epoch in range(1, 501):
+#     loss = train()
+#     print(f'Epoch: {epoch:03d}, Loss: {loss:.4f}')
+#     if epoch%50==0:
+#     	test(epoch)
+# print("nmi measured every 50th epoch:")
+# print(nmi_arr)
