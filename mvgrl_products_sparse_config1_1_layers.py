@@ -62,7 +62,7 @@ def Kmeans(x, K, Niter=10):
     return cl, c
 
 
-dataset="ogbn-products"
+dataset="ogbn-arxiv"
 dataset = PygNodePropPredDataset(name = dataset, root="/home/devvrit/datasets/")
 data = dataset[0].to(device)
 split_idx = dataset.get_idx_split()
@@ -85,7 +85,7 @@ data_s = transform(data_s)
 print("data_orig:", data)
 print("data_s:", data_s)
 print("------S_weights calculated-------")
-x = data.x
+x = data.x.to(device)
 
 train_loader = NeighborSampler(data.edge_index, node_idx=None,
                                sizes=[25, 20, 10], batch_size=2048,
@@ -134,7 +134,7 @@ model2 = DeepGraphInfomax(
     hidden_channels=512, encoder=Encoder(dataset.num_features, 512),
     summary=lambda z, *args, **kwargs: torch.sigmoid(z.mean(dim=0)),
     corruption=corruption).to(device)
-optimizer = torch.optim.Adam(list(model1.parameters()) + list(model2.parameters()), lr=0.001)
+optimizer = torch.optim.Adam(list(model1.parameters()) + list(model2.parameters()), lr=0.0001)
 
 nmi_arr = []
 
@@ -151,12 +151,14 @@ def train(epoch):
         # `adjs` holds a list of `(edge_index, e_id, size)` tuples.
         adjsa = [adj.to(device) for adj in adjs]
         _,n_ids,adjss = train_s_loader.sample(n_id[:batch_size])
+        n_id = n_id.to(device)
+        n_ids = n_ids.to(device)
         adjss = [adj.to(device) for adj in adjss]
 
         optimizer.zero_grad()
-        pos_za, neg_za, summarya = model1(x[n_id], adjs)
+        pos_za, neg_za, summarya = model1(x[n_id], adjsa)
         lossa = model1.loss(pos_za, neg_za, summarya)
-        pos_zs, neg_zs, summarys = model2(x[n_ids], adjs)
+        pos_zs, neg_zs, summarys = model2(x[n_ids], adjss)
         losss = model2.loss(pos_zs, neg_zs, summarys)
         loss = (lossa+losss)/2
         loss.backward()
