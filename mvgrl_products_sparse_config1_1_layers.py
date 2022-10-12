@@ -85,16 +85,37 @@ print("data_s:", data_s)
 print("------S_weights calculated-------")
 
 
+train_loader = NeighborSampler(data.edge_index, node_idx=None,
+                               sizes=[25, 20, 10], batch_size=2048,
+                               shuffle=True, num_workers=0)
+
+train_s_loader = NeighborSampler(data_s.edge_index, node_idx=None,
+                              sizes=[25, 20, 10], batch_size=2048,
+                              shuffle=True, num_workers=0)
+
 class Encoder(nn.Module):
     def __init__(self, in_channels, hidden_channels):
         super().__init__()
-        self.conv = GCNConv(in_channels, hidden_channels, cached=True)
-        self.prelu = nn.PReLU(hidden_channels)
+        self.convs = torch.nn.ModuleList([
+            SAGEConv(in_channels, hidden_channels),
+            SAGEConv(hidden_channels, hidden_channels),
+            SAGEConv(hidden_channels, hidden_channels)
+        ])
 
-    def forward(self, x, edge_index):
-        x = self.conv(x, edge_index)
-        x = self.prelu(x)
+        self.activations = torch.nn.ModuleList()
+        self.activations.extend([
+            nn.PReLU(hidden_channels),
+            nn.PReLU(hidden_channels),
+            nn.PReLU(hidden_channels)
+        ])
+
+    def forward(self, x, adjs):
+        for i, (edge_index, _, size) in enumerate(adjs):
+            x_target = x[:size[1]]  # Target nodes are always placed first.
+            x = self.convs[i]((x, x_target), edge_index)
+            x = self.activations[i](x)
         return x
+
 
 def corruption(x, edge_index):
     return x[torch.randperm(x.size(0))], edge_index
